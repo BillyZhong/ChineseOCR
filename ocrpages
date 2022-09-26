@@ -1,0 +1,11 @@
+#!/bin/bash
+
+if [ $1 == "-c" ]; then
+    pkill -f ocrpage
+    exit 1
+fi
+
+for ((i = $1; i <= $2; i++)); do
+    echo "Starting ./ocrpage $i &"
+    ./ocrpage $i &
+done

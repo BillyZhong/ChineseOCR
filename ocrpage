@@ -1,0 +1,147 @@
+#!/usr/bin/python
+
+import sys, os, subprocess
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+import pickle
+
+arial = ImageFont.truetype("/Library/Fonts/Arial Unicode.ttf", 24)
+
+def get_image_page(pdf_file, out_file, page_num, resolution):
+    if page_num < 1 or page_num > 522:
+        exit()
+    page = str(page_num)
+    command = ["gs", "-q", "-dNOPAUSE", "-dBATCH", "-sDEVICE=png16m", "-r" + str(resolution), "-dPDFFitPage",
+               "-sOutputFile=" + out_file, "-dFirstPage=" + page, "-dLastPage=" + page,
+               pdf_file]
+    f_null = open(os.devnull, 'w')
+    subprocess.call(command, stdout=f_null, stderr=subprocess.STDOUT)
+
+def get_white_score(a):
+    b = a**2
+    t = np.sum(b)
+    t = np.sqrt(t)
+    return t
+
+def is_white(a):
+    return (a == 255).all()
+
+def get_line_chars(line):
+    line_scores = np.apply_along_axis(is_white, 0, line)
+
+    temp_chars = []
+    b = True
+    st = 0
+    for l in enumerate(line_scores):
+        if b:
+            if not l[1]:
+                b = l[1]
+                st = l[0]
+        else:
+            if l[1]:
+                b = l[1]
+                temp_chars.append((st, l[0]))
+
+
+    cd = []
+    for i in range(0, len(temp_chars) - 1):
+        if temp_chars[i+1][0] - temp_chars[i][1] < 5:
+            cd.append(True)
+        else:
+            cd.append(False)
+
+    cd.append(False)
+
+    chars = []
+
+    i = 0
+    while i < len(cd):
+        if cd[i]:
+            j = i
+            while j < len(cd):
+                if not cd[j]:
+                    break
+                j+=1
+            if j == len(cd):
+                chars.append((temp_chars[i][0], temp_chars[-1][1]))
+            else:
+                chars.append((temp_chars[i][0], temp_chars[j][1]))
+            i = j + 1
+        else:
+            chars.append(temp_chars[i])
+            i+=1
+
+
+    chars = filter(lambda i: i[1] - i[0] > 30, chars)
+
+    return chars
+
+def cut_whitespace(c):
+    c_flat = c[:,:,0]
+    white_vert = np.apply_along_axis(is_white, 0, c_flat)
+    white_horiz = np.apply_along_axis(is_white, 1, c_flat)
+    pos_vert = np.argwhere(white_vert == False)
+    pos_horiz = np.argwhere(white_horiz == False)
+    return c[pos_horiz[0][0]:pos_horiz[-1][0], pos_vert[0][0]:pos_vert[-1][0],:]
+
+def ocr(n):
+    mandarin = pickle.load(open( "mandarin.p", "rb" ))
+    print "Unpickled."
+    filename = str(n) + '.jpg'
+    get_image_page('/Users/billy/Downloads/china.pdf', filename, n, 300)
+    print "Opened page " + str(n)
+    im = cv2.imread(filename)
+    im_flat = im[:,:,0]
+    scores = np.apply_along_axis(get_white_score, 1, im_flat)
+
+    ss = sorted(enumerate(scores), key=lambda i : i[1])
+    l1 = ss[0][0]
+    for i in ss:
+        if abs(i[0] - l1) > 10:
+            l2 = i[0]
+            break
+
+    l1, l2 = min(l1, l2)+5, max(l1, l2)-5
+
+    im_overlay = Image.fromarray(im)
+    draw_overlay = ImageDraw.Draw(im_overlay)
+    im_crop = im[l1:l2]
+    im_crop_flat = im_flat[l1:l2]
+
+    white_lines = np.apply_along_axis(is_white, 1, im_crop_flat)
+
+    char_lines = []
+    b = True
+    st = 0
+    for l in enumerate(white_lines):
+        if b:
+            if not l[1]:
+                b = l[1]
+                st = l[0]
+        else:
+            if l[1]:
+                b = l[1]
+                char_lines.append((st, l[0]))
+
+    im_line = map(lambda c: im_crop[c[0]:c[1]], char_lines)
+    im_line_flat = map(lambda c: im_crop_flat[c[0]:c[1]], char_lines)
+
+    for l in range(0, len(im_line_flat)):
+        char_pos = get_line_chars(im_line_flat[l])
+        for i in range(0, len(char_pos)):
+            tc = cut_whitespace(im_line[l][:,char_pos[i][0]:char_pos[i][1],:])
+            if tc.shape[0] > 64 or tc.shape[1] > 64:
+                continue
+            sim = np.apply_along_axis(lambda c: cv2.matchTemplate(c.reshape(64,64,3), tc, cv2.TM_CCOEFF_NORMED).max(), 1, mandarin['imgs'])
+            print mandarin['chars'][np.argmax(sim)]['char'], mandarin['chars'][np.argmax(sim)]['pinyin'], np.max(sim)
+            draw_overlay.text((char_pos[i][0], l1 + char_lines[l][0] - 35), mandarin['chars'][np.argmax(sim)]['pinyin'].decode('utf-8') ,(0,0,0),font=arial)
+            draw_overlay.rectangle([(char_pos[i][0], l1 + char_lines[l][0]), (char_pos[i][1], l1 + char_lines[l][1])], outline=(0,255,0), width=3)
+
+    del draw_overlay
+    im_overlay = np.array(im_overlay)
+
+    cv2.imwrite(filename, im_overlay)
+    print "Saved in " + filename
+
+ocr(int(sys.argv[1]))

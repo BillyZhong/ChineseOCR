@@ -1,0 +1,139 @@
+#!/usr/bin/python
+
+import multiprocessing
+
+#import webbrowser
+import subprocess
+import urllib
+
+from pynput import keyboard
+from pynput.mouse import Controller
+import pyautogui
+
+import numpy as np
+import cv2
+from PIL import Image
+
+import pickle
+
+mandarin = pickle.load(open( "mandarin.p", "rb" ))
+print "Unpickled."
+
+topleft = (0,0)
+bottomright = (0,0)
+mouse = Controller()
+
+def translate_chars(c, l):
+    s = ""
+    j = 0
+    for i in l:
+        if s != "":
+            s += "\n"
+        for k in range(j, j+i):
+            s += c[k].encode('utf-8')
+        j += i
+
+    subprocess.check_output(["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--incognito", "https://translate.google.com/#view=home&op=translate&sl=auto&tl=en&text=" + urllib.quote(s)])
+    #webbrowser.get('open -a /Applications/Google\ Chrome.app --args --incognito %s').open_new("https://translate.google.com/#view=home&op=translate&sl=auto&tl=en&text=" + urllib.quote(s))
+
+def resize_char(c, w):
+    wr = (float(w)/float(c.shape[1]))
+    h = min(int((float(c.shape[0])*float(wr))), 64)
+    img = Image.fromarray(c).resize((w,h))
+    return np.array(img)
+
+def is_white(a):
+    return (a == 255).all()
+
+def cut_whitespace(c):
+    c_flat = c[:,:,0]
+    white_vert = np.apply_along_axis(is_white, 0, c_flat)
+    white_horiz = np.apply_along_axis(is_white, 1, c_flat)
+    pos_vert = np.argwhere(white_vert == False)
+    pos_horiz = np.argwhere(white_horiz == False)
+    return c[pos_horiz[0][0]:pos_horiz[-1][0], pos_vert[0][0]:pos_vert[-1][0],:]
+
+def split(im, ax):
+    im_crop = cut_whitespace(im)
+    im_crop_flat = im_crop[:,:,0]
+    thresh = np.apply_along_axis(is_white, ax, im_crop_flat)
+    white_bounds = np.where(thresh != np.roll(thresh, 1))[0]
+    if(len(white_bounds) == 0):
+        return [im_crop]
+    white_bounds = np.apply_along_axis(lambda i: [white_bounds[i], white_bounds[i+1]], 0, np.arange(0, len(white_bounds), 2)).transpose()
+    white_width = np.apply_along_axis(lambda i: i[1] - i[0], 1, white_bounds)
+    white_preserve = np.array([True]) if white_width.shape[0] == 1 else np.apply_along_axis(lambda i: (np.sum(white_width) - i)/(white_width.shape[0] - 1) < 4*i, 0, white_width)
+    char_bounds = white_bounds[white_preserve].flatten()
+    char_bounds = np.insert(char_bounds, 0, 0)
+    char_bounds = np.append(char_bounds, thresh.shape[0] - 1)
+    char_bounds = char_bounds.reshape((char_bounds.shape[0])/2, 2)
+    char_width = np.apply_along_axis(lambda i: i[1] - i[0], 1, char_bounds)
+    char_preserve = np.apply_along_axis(lambda i: (np.sum(char_width) - i)/(char_width.shape[0] - 1) < 4*i, 0, char_width)
+    char_bounds = char_bounds[char_preserve]
+    if ax == 0:
+        chars = map(lambda i: cut_whitespace(im_crop[:, i[0]:i[1], :]), char_bounds)
+    elif ax == 1:
+        chars = map(lambda i: cut_whitespace(im_crop[i[0]:i[1], :, :]), char_bounds)
+    return chars
+
+def match_char(c):
+    imgs = compute_images(c)
+    sim = np.array(map(lambda k: cv2.matchTemplate(mandarin['imgs'][k].reshape(64,64,3), imgs[mandarin['chars'][k]['width']], cv2.TM_CCOEFF_NORMED).max(), range(0, len(mandarin['chars']))))
+    return np.argmax(sim), np.max(sim)
+
+def preprocess(c):
+    #c = cv2.medianBlur(c, 7)
+    return cut_whitespace(c)
+
+
+def compute_images(c):
+    ws = [9, 13, 14, 16, 20, 23, 24, 25, 26, 27, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64]
+    imgs = {}
+    for w in ws:
+        imgs[w] = resize_char(c, w)
+
+    return imgs
+
+
+def on_press(key):
+    if key == keyboard.Key.alt_r:
+        global topleft
+        topleft = mouse.position+tuple()
+        topleft = (int(2*topleft[0]), int(2*topleft[1]))
+
+def on_release(key):
+    if key == keyboard.Key.alt_r:
+        global topleft, bottomright, mandarin
+        bottomright = mouse.position+tuple()
+        bottomright = (int(2*bottomright[0]), int(2*bottomright[1]))
+        img = pyautogui.screenshot()
+        img = np.array(img)
+        img = img[int(topleft[1]):int(bottomright[1]),int(topleft[0]):int(bottomright[0]),0:3]
+        lines = split(img, 1)
+        chars = []
+        cpl = []
+        for i in range(0, len(lines)):
+            ch = split(lines[i], 0)
+            chars.extend(ch)
+            cpl.append(len(ch))
+
+        print cpl
+        rec = []
+        pool = multiprocessing.Pool()
+        try:
+            matches = pool.map(match_char, chars)
+            for (argm, maxsim) in matches:
+                print mandarin['chars'][argm]['char'], mandarin['chars'][argm]['pinyin'], maxsim
+            rec = map(lambda m: mandarin['chars'][m[0]]['char'], matches)
+        finally:
+            pool.terminate()
+            pool.close()
+
+        translate_chars(rec, cpl)
+    elif key == keyboard.Key.cmd_r:
+        return False
+
+with keyboard.Listener(
+        on_press=on_press,
+        on_release=on_release) as listener:
+    listener.join()
